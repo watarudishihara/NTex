@@ -842,6 +842,9 @@ private struct ToolOptionsPopover: View {
 }
 // MARK: - PencilKit wrapper
 
+import SwiftUI
+import PencilKit
+
 struct PencilCanvas: UIViewRepresentable {
     @Binding var drawing: PKDrawing
     @Binding var tool: ToolType
@@ -849,23 +852,22 @@ struct PencilCanvas: UIViewRepresentable {
     @Binding var strokeWidth: CGFloat
     @Binding var undoManager: UndoManager?
     
-    //Eraser
+    // Eraser
     @Binding var eraseMode: EraseMode
     @Binding var viewport: EraserOverlay.CanvasViewport
 
     // page config
-    
-    private let minPageHeight: CGFloat = 2000      // at least this tall
+    private let minPageHeight: CGFloat = 2000
     private let bottomHeadroom: CGFloat = 1000
-    private let bottomWritingInset: CGFloat = 120
+    private let bottomWritingInset: CGFloat = 120   // (kept for clarity, used via applyInsets)
 
-    func makeCoordinator() -> Coord { Coord(self) }
+    func makeCoordinator() -> Coord { Coord() }
 
     func makeUIView(context: Context) -> PKCanvasView {
         let v = PKCanvasView()
+        context.coordinator.canvas = v
+
         v.delegate = context.coordinator
-        // seed initial viewport
-        context.coordinator.scrollViewDidZoom(v)
         v.isOpaque = true
         v.backgroundColor = .white
         #if targetEnvironment(simulator)
@@ -873,122 +875,240 @@ struct PencilCanvas: UIViewRepresentable {
         #else
         v.drawingPolicy = .pencilOnly
         #endif
-        v.delegate = context.coordinator
-        v.drawing  = drawing
 
-        // scrolling
+        // scrolling / zoom
         v.isScrollEnabled = true
         v.minimumZoomScale = 1
         v.maximumZoomScale = 6
         v.alwaysBounceVertical = true
         v.alwaysBounceHorizontal = false
         v.contentInsetAdjustmentBehavior = .never
+        v.isMultipleTouchEnabled = true
+        v.contentScaleFactor = UIScreen.main.scale
 
-        // first layout pass may have zero width, so do sizing on the next tick
+        // Bindings into coordinator so we don’t rely on a stale struct copy
+        context.coordinator.drawingBinding = $drawing
+        context.coordinator.undoBinding = $undoManager
+        context.coordinator.viewportBinding = $viewport
+
+        // seed initial viewport + content sizing on next runloop
         DispatchQueue.main.async {
             self.applyInsets(v)
             self.ensureContentSize(v)
+            context.coordinator.pushViewport(from: v)
             self.undoManager = v.undoManager
         }
 
-        applyTool(on: v)
+        // Initial state
+        v.drawing = drawing
+        applyToolIfNeeded(on: v, coordinator: context.coordinator)
+
         return v
     }
 
     func updateUIView(_ v: PKCanvasView, context: Context) {
-        v.drawing = drawing
+        // Refresh coordinator bindings in case the parent restructured
+        context.coordinator.drawingBinding = $drawing
+        context.coordinator.undoBinding = $undoManager
+        context.coordinator.viewportBinding = $viewport
+
+        // Only push drawing down if it actually changed (prevents flicker & layout thrash)
+        if v.drawing != drawing {
+            v.drawing = drawing
+        }
+
         applyInsets(v)
-        ensureContentSize(v)     // <- will grow as you add content
-        applyTool(on: v)
+        ensureContentSize(v)
+
+        // Diff tool state (tool type, color, width, erase mode)
+        context.coordinator.currentToolType = tool
+        context.coordinator.currentPenColor = penColor
+        context.coordinator.currentStrokeWidth = strokeWidth
+        context.coordinator.currentEraseMode = eraseMode
+        applyToolIfNeeded(on: v, coordinator: context.coordinator)
     }
+
+    // MARK: - Coordinator
+
     final class Coord: NSObject, PKCanvasViewDelegate, UIScrollViewDelegate {
-        var parent: PencilCanvas
-        var lastWidth: CGFloat = 0
-        init(_ p: PencilCanvas) { self.parent = p }
+        // live canvas reference
+        weak var canvas: PKCanvasView?
 
+        // current inputs to derive toolKey
+        var currentToolType: ToolType = .pen
+        var currentPenColor: Color = .black
+        var currentStrokeWidth: CGFloat = 5
+        var currentEraseMode: EraseMode = .pixel
+
+        // bindings
+        var drawingBinding: Binding<PKDrawing>!
+        var undoBinding: Binding<UndoManager?>!
+        var viewportBinding: Binding<EraserOverlay.CanvasViewport>!
+
+        // memoization to avoid redundant updates
+        var lastToolKey: String = ""
+        var lastGestureEnabled: Bool?
+        
+        //too much refreshing going on
+        private var isActivelyDrawing = false
+        private var pendingSync: DispatchWorkItem?
+
+        // PKCanvasViewDelegate
         func canvasViewDrawingDidChange(_ canvasView: PKCanvasView) {
-            parent.drawing = canvasView.drawing
-            parent.undoManager = canvasView.undoManager
-            parent.ensureContentSize(canvasView)
+            guard !isActivelyDrawing else { return }
+            scheduleSync(from: canvasView, delay: 0.12)   // coalesce small edits
+        }
+        func canvasViewDidBeginUsingTool(_ canvasView: PKCanvasView) {
+            isActivelyDrawing = true
+            // optional: cancel any pending sync that was queued
+            pendingSync?.cancel()
+            pendingSync = nil
+        }
+        func canvasViewDidEndUsingTool(_ canvasView: PKCanvasView) {
+            isActivelyDrawing = false
+            scheduleSync(from: canvasView, delay: 0)      // commit immediately at stroke end
         }
 
-        // Keep viewport in sync so overlay can convert points to content space:
-        func scrollViewDidScroll(_ scrollView: UIScrollView) {
-            parent.viewport = .init(zoomScale: scrollView.zoomScale, contentOffset: scrollView.contentOffset)
+        // UIScrollViewDelegate
+        func scrollViewDidScroll(_ scrollView: UIScrollView) { pushViewport(from: scrollView) }
+        func scrollViewDidZoom(_ scrollView: UIScrollView)   { pushViewport(from: scrollView) }
+
+        func pushViewport(from scrollView: UIScrollView) {
+            viewportBinding.wrappedValue = .init(
+                zoomScale: scrollView.zoomScale,
+                contentOffset: scrollView.contentOffset
+            )
         }
-        func scrollViewDidZoom(_ scrollView: UIScrollView) {
-            parent.viewport = .init(zoomScale: scrollView.zoomScale, contentOffset: scrollView.contentOffset)
-        }
-    }
-    
+        private func scheduleSync(from cv: PKCanvasView, delay: TimeInterval) {
+                pendingSync?.cancel()
+                let work = DispatchWorkItem { [weak self, weak cv] in
+                    guard let self, let cv else { return }
 
-    private func applyTool(on v: PKCanvasView) {
-        switch tool {
-        case .pen:
-            v.drawingGestureRecognizer.isEnabled = true
-            let ui = UIColor(penColor).resolvedColor(with: UITraitCollection(userInterfaceStyle: .light))
-            v.tool = PKInkingTool(.pen, color: ui, width: max(1, strokeWidth))
+                    // Push drawing + undo to SwiftUI
+                    self.drawingBinding.wrappedValue = cv.drawing
+                    self.undoBinding.wrappedValue = cv.undoManager
 
-        case .marker:
-            v.drawingGestureRecognizer.isEnabled = true
-            let ui = UIColor(penColor)
-                .resolvedColor(with: UITraitCollection(userInterfaceStyle: .light))
-                .withAlphaComponent(0.33)
-            v.tool = PKInkingTool(.marker, color: ui, width: max(1, strokeWidth))
-
-        case .eraser:
-            if eraseMode == .object {
-                // whole-stroke erase
-                v.drawingGestureRecognizer.isEnabled = true
-                v.tool = PKEraserTool(.vector)
-            } else {
-                // pixel erase via overlay: block PKCanvasView from drawing/selection
-                v.drawingGestureRecognizer.isEnabled = false
-                // keep a harmless tool; since drawing is disabled, nothing will render
-                v.tool = PKInkingTool(.pen, color: .black, width: 1)
+                    // Grow page AFTER stroke; avoid relayout mid-draw
+                    let targetH = self.desiredContentHeight(cv)
+                    if abs(cv.contentSize.height - targetH) > 1 {
+                        cv.contentSize = CGSize(width: max(1, cv.bounds.width), height: targetH)
+                    }
+                }
+                pendingSync = work
+                if delay == 0 {
+                    DispatchQueue.main.async(execute: work)
+                } else {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
+                }
             }
 
-        case .lasso:
-            // optional: turning drawing off here prevents accidental marks if you flip tools fast
-            v.drawingGestureRecognizer.isEnabled = false
-            v.tool = PKLassoTool()
-
-        case .shape:
-            v.drawingGestureRecognizer.isEnabled = true
-            v.tool = PKInkingTool(.pen, color: UIColor(penColor), width: max(1, strokeWidth))
+        // local copy of desired height so we can call it from delegate
+        private func desiredContentHeight(_ v: PKCanvasView) -> CGFloat {
+            let viewportH = max(1, v.bounds.height)
+            let minH = max(2000, viewportH + 200)
+            let drawingBottom = v.drawing.bounds.isEmpty ? 0 : v.drawing.bounds.maxY
+            return max(minH, drawingBottom + 1000)
         }
     }
+
+    // MARK: - Tool application (diffed)
+
+    private func applyToolIfNeeded(on v: PKCanvasView, coordinator: Coord) {
+        let key = toolKey(
+            tool: coordinator.currentToolType,
+            color: coordinator.currentPenColor,
+            width: coordinator.currentStrokeWidth,
+            eraseMode: coordinator.currentEraseMode
+        )
+        if key != coordinator.lastToolKey {
+            // Toggle drawing gesture only when necessary
+            let shouldEnableDrawing: Bool
+            switch coordinator.currentToolType {
+            case .pen, .marker, .shape:
+                shouldEnableDrawing = true
+            case .eraser:
+                shouldEnableDrawing = (coordinator.currentEraseMode == .object) // vector erase draws; pixel erase uses overlay
+            case .lasso:
+                shouldEnableDrawing = false
+            }
+
+            if coordinator.lastGestureEnabled != shouldEnableDrawing {
+                v.drawingGestureRecognizer.isEnabled = shouldEnableDrawing
+                coordinator.lastGestureEnabled = shouldEnableDrawing
+            }
+
+            // Apply concrete PKTool
+            switch coordinator.currentToolType {
+            case .pen:
+                let ui = UIColor(coordinator.currentPenColor)
+                    .resolvedColor(with: UITraitCollection(userInterfaceStyle: .light))
+                v.tool = PKInkingTool(.pen, color: ui, width: max(1, coordinator.currentStrokeWidth))
+
+            case .marker:
+                let ui = UIColor(coordinator.currentPenColor)
+                    .resolvedColor(with: UITraitCollection(userInterfaceStyle: .light))
+                    .withAlphaComponent(0.33)
+                v.tool = PKInkingTool(.marker, color: ui, width: max(1, coordinator.currentStrokeWidth))
+
+            case .eraser:
+                if coordinator.currentEraseMode == .object {
+                    v.tool = PKEraserTool(.vector)
+                } else {
+                    // keep harmless tool; drawing is disabled, overlay does pixel erase
+                    v.tool = PKInkingTool(.pen, color: .black, width: 1)
+                }
+
+            case .lasso:
+                v.tool = PKLassoTool()
+
+            case .shape:
+                let ui = UIColor(coordinator.currentPenColor)
+                    .resolvedColor(with: UITraitCollection(userInterfaceStyle: .light))
+                v.tool = PKInkingTool(.pen, color: ui, width: max(1, coordinator.currentStrokeWidth))
+            }
+
+            coordinator.lastToolKey = key
+        }
+    }
+
+    private func toolKey(tool: ToolType, color: Color, width: CGFloat, eraseMode: EraseMode) -> String {
+        switch tool {
+        case .pen:    return "pen:\(UIColor(color).description):\(width)"
+        case .marker: return "marker:\(UIColor(color).description):\(width)"
+        case .shape:  return "shape:\(UIColor(color).description):\(width)"
+        case .lasso:  return "lasso"
+        case .eraser: return "eraser:\(eraseMode == .object ? "vector" : "pixel")"
+        }
+    }
+
+    // MARK: - Layout helpers (your originals, lightly guarded)
 
     private func desiredContentHeight(_ v: PKCanvasView) -> CGFloat {
         let viewportH = max(1, v.bounds.height)
-        let minH = max(minPageHeight, viewportH + 200)       // never smaller than the viewport
+        let minH = max(minPageHeight, viewportH + 200)
         let drawingBottom = v.drawing.bounds.isEmpty ? 0 : v.drawing.bounds.maxY
         return max(minH, drawingBottom + bottomHeadroom)
     }
 
     private func applyInsets(_ v: PKCanvasView) {
-        // Extra writing space for content (scrolls past bottom)
         let safe = v.safeAreaInsets.bottom
         let writePad: CGFloat = max(60, safe)
-        v.contentInset.bottom = writePad
-
-        // Let the vertical scrollbar run almost to the edge
+        if v.contentInset.bottom != writePad {
+            v.contentInset.bottom = writePad
+        }
         let indicatorPad: CGFloat = max(2, safe + 2)
-
         if #available(iOS 13.0, *) {
             var vi = v.verticalScrollIndicatorInsets
-            vi.bottom = indicatorPad
-            v.verticalScrollIndicatorInsets = vi
-
-            // We don't scroll horizontally, but set it too if you want:
-            // var hi = v.horizontalScrollIndicatorInsets
-            // hi.right = 2
-            // v.horizontalScrollIndicatorInsets = hi
+            if vi.bottom != indicatorPad {
+                vi.bottom = indicatorPad
+                v.verticalScrollIndicatorInsets = vi
+            }
         } else {
-            // Fallback for very old iOS
             var si = v.scrollIndicatorInsets
-            si.bottom = indicatorPad
-            v.scrollIndicatorInsets = si
+            if si.bottom != indicatorPad {
+                si.bottom = indicatorPad
+                v.scrollIndicatorInsets = si
+            }
         }
     }
 
@@ -1000,7 +1120,6 @@ struct PencilCanvas: UIViewRepresentable {
         }
     }
 }
-
 
 // MARK: - KaTeX SwiftUI wrapper
 
