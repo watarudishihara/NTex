@@ -9,9 +9,11 @@ import SwiftUI
 
 @main
 struct NTexApp: App {
+    @StateObject private var store = NotebookStore.shared
     var body: some Scene {
         WindowGroup {
-            ContentView()
+            FoldersView()                 // start at folders list
+                .environmentObject(store) // inject the store once
         }
     }
 }

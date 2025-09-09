@@ -6,6 +6,10 @@
 	objectVersion = 77;
 	objects = {
 
+/* Begin PBXBuildFile section */
+		13BBB1F8816FBBDC777A2662 /* Pods_NTex.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = B56F2BFCA00A4D67FE4C036E /* Pods_NTex.framework */; };
+/* End PBXBuildFile section */
+
 /* Begin PBXContainerItemProxy section */
 		FAA762412E66CAE800BF88FD /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
@@ -23,15 +27,45 @@
 		};
 /* End PBXContainerItemProxy section */
 
+/* Begin PBXCopyFilesBuildPhase section */
+		FA5B05772E66D29A00F111CB /* Embed Frameworks */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "";
+			dstSubfolderSpec = 10;
+			files = (
+			);
+			name = "Embed Frameworks";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXCopyFilesBuildPhase section */
+
 /* Begin PBXFileReference section */
+		4C6F267B39C2FA0184835A7A /* Pods-NTex.debug.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-NTex.debug.xcconfig"; path = "Target Support Files/Pods-NTex/Pods-NTex.debug.xcconfig"; sourceTree = "<group>"; };
+		B56F2BFCA00A4D67FE4C036E /* Pods_NTex.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; includeInIndex = 0; path = Pods_NTex.framework; sourceTree = BUILT_PRODUCTS_DIR; };
+		CD199A10CB7A17371FCBF468 /* Pods-NTex.release.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-NTex.release.xcconfig"; path = "Target Support Files/Pods-NTex/Pods-NTex.release.xcconfig"; sourceTree = "<group>"; };
+		FA5B05742E66D29A00F111CB /* iosMath.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; path = iosMath.framework; sourceTree = BUILT_PRODUCTS_DIR; };
 		FAA762322E66CAE700BF88FD /* NTex.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = NTex.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		FAA762402E66CAE800BF88FD /* NTexTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = NTexTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		FAA7624A2E66CAE800BF88FD /* NTexUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = NTexUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
+/* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
+		FACE2EF12E6804B80075483F /* Exceptions for "NTex" folder in "NTex" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				Info.plist,
+			);
+			target = FAA762312E66CAE700BF88FD /* NTex */;
+		};
+/* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
+
 /* Begin PBXFileSystemSynchronizedRootGroup section */
 		FAA762342E66CAE700BF88FD /* NTex */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+				FACE2EF12E6804B80075483F /* Exceptions for "NTex" folder in "NTex" target */,
+			);
 			path = NTex;
 			sourceTree = "<group>";
 		};
@@ -52,6 +86,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				13BBB1F8816FBBDC777A2662 /* Pods_NTex.framework in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -72,6 +107,24 @@
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
+		342CC71A2799448046866D3A /* Pods */ = {
+			isa = PBXGroup;
+			children = (
+				4C6F267B39C2FA0184835A7A /* Pods-NTex.debug.xcconfig */,
+				CD199A10CB7A17371FCBF468 /* Pods-NTex.release.xcconfig */,
+			);
+			path = Pods;
+			sourceTree = "<group>";
+		};
+		A3F3275A2D8CDB108A8D7C08 /* Frameworks */ = {
+			isa = PBXGroup;
+			children = (
+				FA5B05742E66D29A00F111CB /* iosMath.framework */,
+				B56F2BFCA00A4D67FE4C036E /* Pods_NTex.framework */,
+			);
+			name = Frameworks;
+			sourceTree = "<group>";
+		};
 		FAA762292E66CAE700BF88FD = {
 			isa = PBXGroup;
 			children = (
@@ -79,6 +132,8 @@
 				FAA762432E66CAE800BF88FD /* NTexTests */,
 				FAA7624D2E66CAE800BF88FD /* NTexUITests */,
 				FAA762332E66CAE700BF88FD /* Products */,
+				342CC71A2799448046866D3A /* Pods */,
+				A3F3275A2D8CDB108A8D7C08 /* Frameworks */,
 			);
 			sourceTree = "<group>";
 		};
@@ -99,9 +154,11 @@
 			isa = PBXNativeTarget;
 			buildConfigurationList = FAA762542E66CAE800BF88FD /* Build configuration list for PBXNativeTarget "NTex" */;
 			buildPhases = (
+				0BE537D1A4319E4DD5385662 /* [CP] Check Pods Manifest.lock */,
 				FAA7622E2E66CAE700BF88FD /* Sources */,
 				FAA7622F2E66CAE700BF88FD /* Frameworks */,
 				FAA762302E66CAE700BF88FD /* Resources */,
+				FA5B05772E66D29A00F111CB /* Embed Frameworks */,
 			);
 			buildRules = (
 			);
@@ -111,8 +168,6 @@
 				FAA762342E66CAE700BF88FD /* NTex */,
 			);
 			name = NTex;
-			packageProductDependencies = (
-			);
 			productName = NTex;
 			productReference = FAA762322E66CAE700BF88FD /* NTex.app */;
 			productType = "com.apple.product-type.application";
@@ -134,8 +189,6 @@
 				FAA762432E66CAE800BF88FD /* NTexTests */,
 			);
 			name = NTexTests;
-			packageProductDependencies = (
-			);
 			productName = NTexTests;
 			productReference = FAA762402E66CAE800BF88FD /* NTexTests.xctest */;
 			productType = "com.apple.product-type.bundle.unit-test";
@@ -157,8 +210,6 @@
 				FAA7624D2E66CAE800BF88FD /* NTexUITests */,
 			);
 			name = NTexUITests;
-			packageProductDependencies = (
-			);
 			productName = NTexUITests;
 			productReference = FAA7624A2E66CAE800BF88FD /* NTexUITests.xctest */;
 			productType = "com.apple.product-type.bundle.ui-testing";
@@ -230,6 +281,31 @@
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXResourcesBuildPhase section */
+
+/* Begin PBXShellScriptBuildPhase section */
+		0BE537D1A4319E4DD5385662 /* [CP] Check Pods Manifest.lock */ = {
+			isa = PBXShellScriptBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+			);
+			inputPaths = (
+				"${PODS_PODFILE_DIR_PATH}/Podfile.lock",
+				"${PODS_ROOT}/Manifest.lock",
+			);
+			name = "[CP] Check Pods Manifest.lock";
+			outputFileListPaths = (
+			);
+			outputPaths = (
+				"$(DERIVED_FILE_DIR)/Pods-NTex-checkManifestLockResult.txt",
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "diff \"${PODS_PODFILE_DIR_PATH}/Podfile.lock\" \"${PODS_ROOT}/Manifest.lock\" > /dev/null\nif [ $? != 0 ] ; then\n    # print error to STDERR\n    echo \"error: The sandbox is not in sync with the Podfile.lock. Run 'pod install' or update your CocoaPods installation.\" >&2\n    exit 1\nfi\n# This output is used by Xcode 'outputs' to avoid re-running this script phase.\necho \"SUCCESS\" > \"${SCRIPT_OUTPUT_FILE_0}\"\n";
+			showEnvVarsInLog = 0;
+		};
+/* End PBXShellScriptBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
 		FAA7622E2E66CAE700BF88FD /* Sources */ = {
@@ -387,6 +463,7 @@
 		};
 		FAA762552E66CAE800BF88FD /* Debug */ = {
 			isa = XCBuildConfiguration;
+			baseConfigurationReference = 4C6F267B39C2FA0184835A7A /* Pods-NTex.debug.xcconfig */;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
@@ -397,6 +474,7 @@
 				ENABLE_HARDENED_RUNTIME = YES;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = NTex/Info.plist;
 				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphoneos*]" = YES;
 				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphonesimulator*]" = YES;
 				"INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents[sdk=iphoneos*]" = YES;
@@ -407,7 +485,7 @@
 				"INFOPLIST_KEY_UIStatusBarStyle[sdk=iphonesimulator*]" = UIStatusBarStyleDefault;
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
-				IPHONEOS_DEPLOYMENT_TARGET = 18.5;
+				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
 				LD_RUNPATH_SEARCH_PATHS = "@executable_path/Frameworks";
 				"LD_RUNPATH_SEARCH_PATHS[sdk=macosx*]" = "@executable_path/../Frameworks";
 				MACOSX_DEPLOYMENT_TARGET = 15.5;
@@ -416,16 +494,18 @@
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				REGISTER_APP_GROUPS = YES;
 				SDKROOT = auto;
-				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator macosx xros xrsimulator";
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SUPPORTS_MACCATALYST = NO;
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_VERSION = 5.0;
-				TARGETED_DEVICE_FAMILY = "1,2,7";
+				TARGETED_DEVICE_FAMILY = "1,2";
 				XROS_DEPLOYMENT_TARGET = 2.5;
 			};
 			name = Debug;
 		};
 		FAA762562E66CAE800BF88FD /* Release */ = {
 			isa = XCBuildConfiguration;
+			baseConfigurationReference = CD199A10CB7A17371FCBF468 /* Pods-NTex.release.xcconfig */;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
@@ -436,6 +516,7 @@
 				ENABLE_HARDENED_RUNTIME = YES;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = NTex/Info.plist;
 				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphoneos*]" = YES;
 				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphonesimulator*]" = YES;
 				"INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents[sdk=iphoneos*]" = YES;
@@ -446,7 +527,7 @@
 				"INFOPLIST_KEY_UIStatusBarStyle[sdk=iphonesimulator*]" = UIStatusBarStyleDefault;
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
-				IPHONEOS_DEPLOYMENT_TARGET = 18.5;
+				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
 				LD_RUNPATH_SEARCH_PATHS = "@executable_path/Frameworks";
 				"LD_RUNPATH_SEARCH_PATHS[sdk=macosx*]" = "@executable_path/../Frameworks";
 				MACOSX_DEPLOYMENT_TARGET = 15.5;
@@ -455,10 +536,11 @@
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				REGISTER_APP_GROUPS = YES;
 				SDKROOT = auto;
-				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator macosx xros xrsimulator";
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SUPPORTS_MACCATALYST = NO;
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_VERSION = 5.0;
-				TARGETED_DEVICE_FAMILY = "1,2,7";
+				TARGETED_DEVICE_FAMILY = "1,2";
 				XROS_DEPLOYMENT_TARGET = 2.5;
 			};
 			name = Release;
