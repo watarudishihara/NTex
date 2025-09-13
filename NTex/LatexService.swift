@@ -1,5 +1,84 @@
+// LatexService.swift
 import Foundation
 import UIKit
+import WebKit
+#if canImport(FoundationModels)
+import FoundationModels
+#endif
+
+// MARK: - Abstraction
+
+protocol LatexConverting {
+    func convert(image: UIImage) async throws -> String
+}
+
+enum LatexService {
+    // load once
+    static let htmlShell = """
+    <!doctype html>
+    <html><head>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.10/dist/katex.min.css">
+    <script src="https://cdn.jsdelivr.net/npm/katex@0.16.10/dist/katex.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/katex@0.16.10/dist/contrib/auto-render.min.js"></script>
+    <style>
+      :root { color-scheme: light dark; }
+      body { margin:0; padding:24px; line-height:1.5;
+             font-family: ui-serif, "Times New Roman", Times, serif; }
+      .title  { text-align:center; font-weight:700; font-size:28px; margin:.5rem 0 0 }
+      .author { text-align:center; color:#444; margin:0 0 1rem }  /* darker than opacity */
+      .meta   { text-align:center; color:#888; margin:0 0 1.2rem }
+      code    { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+    </style>
+    </head>
+    <body>
+      <div id="root"></div>
+      <script>
+        window.NTex = {
+          root: document.getElementById('root'),
+          setHTML(inner) {
+            this.root.innerHTML = inner;
+            if (window.renderMathInElement) {
+              renderMathInElement(this.root, {
+                delimiters: [
+                  {left: "$$", right: "$$", display: true},
+                  {left: "$",  right: "$",  display: false},
+                  {left: "\\(", right: "\\)", display: false},
+                  {left: "\\[", right: "\\]", display: true}
+                ],
+                throwOnError: false,
+                trust: true
+              });
+            }
+          }
+        };
+      </script>
+    </body></html>
+    """
+
+    static func loadShell(into webView: WKWebView) {
+        webView.loadHTMLString(htmlShell, baseURL: nil)
+    }
+
+    /// Convert user text to inner HTML (uses your new MiniTeX)
+    static func renderInnerHTML(from source: String) -> String {
+        // MiniTeX.render returns a fragment that already includes a small <style> and KaTeX triggers.
+        // If you prefer, you can strip its <style> and keep only the body—either works.
+        return MiniTeX.render(source)
+    }
+
+    /// Inject new HTML into the shell without reloading the whole page.
+    static func setInnerHTML(_ html: String, on webView: WKWebView) {
+        let b64 = (html.data(using: .utf8) ?? Data()).base64EncodedString()
+        let js = """
+        (function(){
+          var s = atob('\(b64)');
+          if (window.NTex && window.NTex.setHTML) { window.NTex.setHTML(s); }
+        })();
+        """
+        webView.evaluateJavaScript(js, completionHandler: nil)
+    }
+}
 
 enum LatexServiceError: LocalizedError {
     case invalidBaseURL
@@ -7,6 +86,7 @@ enum LatexServiceError: LocalizedError {
     case noData
     case decodeFailed
     case imageEncodingFailed
+    case onDeviceUnavailable(String)
 
     var errorDescription: String? {
         switch self {
@@ -20,89 +100,145 @@ enum LatexServiceError: LocalizedError {
             return "Could not decode server response."
         case .imageEncodingFailed:
             return "Could not encode the image for upload."
+        case .onDeviceUnavailable(let why):
+            return "On-device conversion isn’t available: \(why)"
         }
     }
 }
 
-struct LatexResponse: Decodable {
-    let latex: String
-}
+struct LatexResponse: Decodable { let latex: String }
 
-/// Small, testable service for POST /to_latex (multipart/form-data)
-struct LatexService {
+// MARK: - Network backend (your existing flow)
 
-    /// Uploads an image and returns the LaTeX string.
-    /// - Parameters:
-    ///   - image: UIImage to send (JPEG preferred)
-    ///   - baseURLString: e.g. "http://192.168.0.42:8000"
-    static func convert(image: UIImage, baseURLString: String) async throws -> String {
-        guard let url = buildURL(baseURLString: baseURLString) else {
-            throw LatexServiceError.invalidBaseURL
-        }
-
-        // Prefer JPEG ~90%; fall back to PNG
-        let jpegData = image.jpegData(compressionQuality: 0.9)
-        let payloadData = jpegData ?? image.pngData()
-        guard let bodyData = payloadData else {
+struct NetworkLatexConverter: LatexConverting {
+    let apiKey: String
+    
+    func convert(image: UIImage) async throws -> String {
+        // Convert UIImage to JPEG
+        guard let jpegData = image.jpegData(compressionQuality: 0.9) else {
             throw LatexServiceError.imageEncodingFailed
         }
 
+        // Base64 encode for Gemini
+        let base64Image = jpegData.base64EncodedString()
+        
+        // Gemini endpoint (using flash for speed/cost)
+        guard let url = URL(string: "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-pro:generateContent?key=\(apiKey)") else {
+            throw LatexServiceError.invalidBaseURL
+        }
+        
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
-
-        // Build multipart body
-        let boundary = "Boundary-\(UUID().uuidString)"
-        request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
-
-        var body = Data()
-        body.append("--\(boundary)\r\n")
-        body.append("Content-Disposition: form-data; name=\"file\"; filename=\"note.jpg\"\r\n")
-        body.append("Content-Type: \(jpegData != nil ? "image/jpeg" : "image/png")\r\n\r\n")
-        body.append(bodyData)
-        body.append("\r\n")
-        body.append("--\(boundary)--\r\n")
-        request.httpBody = body
-
-        // Short-ish timeout so the UI stays responsive
-        let config = URLSessionConfiguration.ephemeral
-        config.timeoutIntervalForRequest = 30
-        config.timeoutIntervalForResource = 60
-        let session = URLSession(configuration: config)
-
-        let (data, response) = try await session.data(for: request)
-
-        guard let http = response as? HTTPURLResponse else {
-            throw LatexServiceError.noData
+        request.addValue("application/json", forHTTPHeaderField: "Content-Type")
+        
+        func loadPrompt() -> String {
+            guard let url = Bundle.main.url(forResource: "Prompt", withExtension: "txt"),
+                  let content = try? String(contentsOf: url, encoding: .utf8) else {
+                return "Convert handwriting into LaTeX. Only return LaTeX code."
+            }
+            return content
         }
 
-        guard (200..<300).contains(http.statusCode) else {
+
+        // Build JSON body with text instruction + image
+        let systemPrompt = loadPrompt()
+        let body: [String: Any] = [
+            "contents": [[
+                "parts": [
+                    ["text": systemPrompt + "\n\nHere is the image:"],
+                    ["inlineData": [
+                        "mimeType": "image/jpeg",
+                        "data": base64Image
+                    ]]
+                ]
+            ]]
+        ]
+        
+        request.httpBody = try JSONSerialization.data(withJSONObject: body)
+        
+        // Send request
+        let (data, response) = try await URLSession.shared.data(for: request)
+        guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
             let snippet = String(data: data, encoding: .utf8) ?? ""
-            throw LatexServiceError.badStatus(http.statusCode, snippet)
+            throw LatexServiceError.badStatus((response as? HTTPURLResponse)?.statusCode ?? -1, snippet)
         }
-
-        guard !data.isEmpty else { throw LatexServiceError.noData }
-        guard let result = try? JSONDecoder().decode(LatexResponse.self, from: data) else {
+        
+        // Decode Gemini JSON response
+        struct GeminiResponse: Decodable {
+            struct Candidate: Decodable {
+                struct Content: Decodable {
+                    struct Part: Decodable { let text: String? }
+                    let parts: [Part]
+                }
+                let content: Content
+            }
+            let candidates: [Candidate]
+        }
+        
+        let decoded = try JSONDecoder().decode(GeminiResponse.self, from: data)
+        var latex = decoded.candidates.first?.content.parts.first?.text
+        
+        // Clean up ```latex fences if Gemini wrapped it
+        latex = latex?
+            .replacingOccurrences(of: "```latex", with: "")
+            .replacingOccurrences(of: "```", with: "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        
+        guard let latexString = latex, !latexString.isEmpty else {
             throw LatexServiceError.decodeFailed
         }
-        return result.latex
+        return latexString
     }
-
-    private static func buildURL(baseURLString: String) -> URL? {
-        guard var comps = URLComponents(string: baseURLString.trimmingCharacters(in: .whitespaces)) else { return nil }
-        // If user typed just 192.168.x.x:8000, add http:// for them
-        if comps.scheme == nil { comps.scheme = "http" }
-        // Ensure we call /to_latex
-        var base = comps.url
-        if let u = base, !u.absoluteString.hasSuffix("/") {
-            base = URL(string: u.absoluteString + "/")
+}
+// MARK: - On-device backend (stub you can later wire to Apple’s on-device model)
+#if canImport(FoundationModels)
+struct OnDeviceLatexConverter: LatexConverting {
+    func convert(image: UIImage) async throws -> String {
+        // Ensure availability
+        guard #available(iOS 18.0, *), FoundationModels.isAvailable else {
+            throw LatexServiceError.onDeviceUnavailable("Apple Intelligence not supported on this device.")
         }
-        return base?.appendingPathComponent("to_latex")
-    }
-}
 
-// MARK: - Data helper
-private extension Data {
-    mutating func append(_ string: String) {
-        if let d = string.data(using: .utf8) { append(d) }
+        // 1. Get a reference to the built-in text model
+        let model = try await FMTextModel.named(.foundational)  // Apple’s built-in LLM
+
+        // 2. Convert UIImage → JPEG data
+        guard let jpegData = image.jpegData(compressionQuality: 0.85) else {
+            throw LatexServiceError.imageEncodingFailed
+        }
+
+        // 3. Ask the model to describe the image as LaTeX
+        // (You may later swap this for a vision-capable variant if Apple ships one;
+        //  for now, we treat this as OCR via prompt injection.)
+        let prompt = """
+        You are a LaTeX converter. The user provides an image of handwriting or math.
+        Respond ONLY with LaTeX code representing the content of the image.
+        Do not add commentary.
+
+        Here is the image:
+        """
+
+        let request = FMTextRequest(
+            messages: [
+                .user(prompt, attachments: [.init(data: jpegData, type: .imageJpeg)])
+            ],
+            options: .init(temperature: 0.0) // deterministic output
+        )
+
+        let response = try await model.complete(request: request)
+
+        // 4. Return the text
+        guard let latex = response.outputText, !latex.isEmpty else {
+            throw LatexServiceError.decodeFailed
+        }
+
+        return latex
     }
 }
+#else
+struct OnDeviceLatexConverter: LatexConverting {
+    func convert(image: UIImage) async throws -> String {
+        throw LatexServiceError.onDeviceUnavailable("This iOS SDK doesn’t include FoundationModels.")
+    }
+}
+#endif

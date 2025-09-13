@@ -50,6 +50,7 @@ private struct TouchCaptureView: UIViewRepresentable {
 
 /// Live view that collects an eraser path and returns it in PKCanvasView content coordinates.
 struct EraserOverlay: View {
+    
     struct CanvasViewport: Equatable {
         var zoomScale: CGFloat = 1
         var contentOffset: CGPoint = .zero
@@ -72,11 +73,12 @@ struct EraserOverlay: View {
             ZStack {
                 // 1) subtle preview of the eraser path
                 if isDrawing, localPoints.count > 1 {
+                    let displayRadius = radius * viewport.zoomScale
                     Path { p in p.addLines(localPoints) }
                         .stroke(Color.blue.opacity(0.25),
-                                style: StrokeStyle(lineWidth: max(1, radius/2),
+                                style: StrokeStyle(lineWidth: max(1, displayRadius*2),
                                                    lineCap: .round, lineJoin: .round))
-                        .allowsHitTesting(false) // preview shouldn't take touches
+                        .allowsHitTesting(false)
                 }
 
                 // 2) transparent view that SWALLOWS touches and feeds us points

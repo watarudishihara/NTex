@@ -153,6 +153,8 @@ struct ContentView: View {
         #endif
     }()
     
+    @AppStorage("conversionBackend") private var conversionBackend: String = "server" // "server" | "ondevice"
+    
     //tools
     @State private var strokeWidth: CGFloat = 5
 
@@ -163,7 +165,7 @@ struct ContentView: View {
     //eraser
     @State private var eraseMode: EraseMode = .pixel
     @State private var eraserRadius: CGFloat = 12
-    @State private var eraserWidthFavorites: [CGFloat] = [8, 12, 20]
+    @State private var eraserWidthFavorites: [CGFloat] = [8, 20, 50]
 
     // Viewport from PKCanvasView so we can convert overlay points -> canvas content coords
     @State private var canvasViewport = EraserOverlay.CanvasViewport()
@@ -209,6 +211,14 @@ struct ContentView: View {
 
     // Right panel width
     @State private var panelWidth: CGFloat = 360
+    
+    //Exporting
+    @State private var showExportMenu = false
+    @State private var typesetExporter = TypesetExporter() // keep a strong ref
+    
+    private var katexBaseURL: URL? {
+        Bundle.main.url(forResource: "katex", withExtension: nil) ?? Bundle.main.resourceURL
+    }
     // Keep the heavy layout out of `body` so the compiler is happy
     @ViewBuilder
     private var layout: some View {
@@ -271,14 +281,12 @@ struct ContentView: View {
             }
 
             // Export .tex
-            if !latexText.isEmpty {
-                Button {
-                    shareURL = makeTempTexFile(text: latexText)
-                    showShare = true
-                } label: {
-                    Label("Export .tex", systemImage: "square.and.arrow.up")
-                }
+            Button {
+                showExportMenu = true
+            } label: {
+                Label("Export", systemImage: "square.and.arrow.up")
             }
+            .disabled(latexText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
         }
     }
 
@@ -326,7 +334,9 @@ struct ContentView: View {
             layout                                   // only the big HStack lives here
         }
         // Attach ALL modifiers to the NavigationStack (not the HStack)
-        .sheet(isPresented: $showSettings) { SettingsView(baseURL: $baseURL) }
+        .sheet(isPresented: $showSettings) {
+            SettingsView(baseURL: $baseURL, conversionBackend: $conversionBackend)
+        }
         .sheet(isPresented: $showCropper) {
             if let img = currentImageForCrop() {
                 CropperSheet(image: img) { self.pickedImage = $0 }
@@ -349,6 +359,12 @@ struct ContentView: View {
         .onChange(of: latexText)  { _, _ in save() }
         .onChange(of: pickedImage){ _, _ in save(updateCover: true) }
         .onDisappear { save(updateCover: true) }
+        //exporting
+        .confirmationDialog("Export", isPresented: $showExportMenu, titleVisibility: .visible) {
+            Button("Typeset PDF (HTML + KaTeX)") { exportTypesetPDF() }
+            Button("LaTeX (.tex)") { exportTeX() }
+            Button("Cancel", role: .cancel) { }
+        }
 
         .toolbar { contentToolbar }                  // explicit ToolbarContent below
     }
@@ -413,39 +429,78 @@ struct ContentView: View {
                     // Pixel-eraser overlay (captures polyline and performs stroke splitting)
                     if currentTool == .eraser && eraseMode == .pixel {
                         EraserOverlay(radius: eraserRadius, viewport: $canvasViewport) { polyInCanvas in
-                            let before = drawing
-                            // Convert radius to canvas-content units (account for zoom)
-                            let rInCanvas = max(0.5, eraserRadius / max(0.001, canvasViewport.zoomScale))
-                            let after = StrokeEraser.erase(before, with: polyInCanvas, radius: rInCanvas)
-                            if before != after {
-                                // inside EraserOverlay onEnded { polyInCanvas in ... }
-                                let before = drawing
-                                let rInCanvas = max(0.5, eraserRadius / max(0.001, canvasViewport.zoomScale))
-                                let after = StrokeEraser.erase(before, with: polyInCanvas, radius: rInCanvas)
-                                guard before != after else { return }
+                            // Sanity: need at least a segment
+                            guard polyInCanvas.count >= 2 else { return }
 
-                                // apply
-                                drawing = after
+                            // Radius in canvas space
+                            let r = max(0.5, eraserRadius / max(0.001, canvasViewport.zoomScale))
 
-                                // make a target that knows how to write back into @State
-                                let target = DrawingUndoTarget { newVal in
-                                    self.drawing = newVal
+                            // Compute eraser polyline bounds
+                            func bounds(of pts: [CGPoint]) -> CGRect {
+                                var minX = CGFloat.greatestFiniteMagnitude
+                                var minY = CGFloat.greatestFiniteMagnitude
+                                var maxX = -CGFloat.greatestFiniteMagnitude
+                                var maxY = -CGFloat.greatestFiniteMagnitude
+                                for p in pts {
+                                    if p.x < minX { minX = p.x }
+                                    if p.y < minY { minY = p.y }
+                                    if p.x > maxX { maxX = p.x }
+                                    if p.y > maxY { maxY = p.y }
                                 }
-
-                                // group + name the action and make redo work
-                                canvasUndo?.beginUndoGrouping()
-                                canvasUndo?.registerUndo(withTarget: target) { t in
-                                    let current = self.drawing
-                                    t.set(before) // undo -> restore "before"
-                                    // register redo
-                                    self.canvasUndo?.registerUndo(withTarget: target) { t2 in
-                                        t2.set(current)
-                                    }
-                                }
-                                canvasUndo?.setActionName("Erase")
-                                canvasUndo?.endUndoGrouping()
+                                if minX > maxX || minY > maxY { return .null }
+                                return CGRect(x: minX, y: minY, width: maxX - minX, height: maxY - minY)
                             }
+
+                            let polyBounds = bounds(of: polyInCanvas)
+                            guard !polyBounds.isNull else { return }
+                            // Expand by radius (+ a tiny epsilon to be safe)
+                            let expanded = polyBounds.insetBy(dx: -(r + 1.0), dy: -(r + 1.0))
+
+                            // Split drawing into far/near sets using fast bounds test
+                            let all = drawing.strokes
+                            var near: [PKStroke] = []
+                            var far:  [PKStroke] = []
+                            near.reserveCapacity(all.count)
+                            far.reserveCapacity(all.count)
+
+                            for s in all {
+                                // Use renderBounds — it accounts for stroke width
+                                if s.renderBounds.intersects(expanded) {
+                                    near.append(s)
+                                } else {
+                                    far.append(s)
+                                }
+                            }
+
+                            // If nothing is near, exit early
+                            guard !near.isEmpty else { return }
+
+                            // Erase only the near subset
+                            let nearDrawing = PKDrawing(strokes: near)
+                            let erasedNear  = StrokeEraser.erase(nearDrawing, with: polyInCanvas, radius: r)
+
+                            // Merge back (preserve original ordering: far first is fine visually)
+                            let merged = PKDrawing(strokes: far + erasedNear.strokes)
+
+                            // Apply + undo registration
+                            let before = drawing
+                            guard before != merged else { return }
+
+                            drawing = merged
+                            let target = DrawingUndoTarget { self.drawing = $0 }
+
+                            canvasUndo?.beginUndoGrouping()
+                            canvasUndo?.registerUndo(withTarget: target) { t in
+                                let current = self.drawing
+                                t.set(before)
+                                self.canvasUndo?.registerUndo(withTarget: target) { t2 in
+                                    t2.set(current)
+                                }
+                            }
+                            canvasUndo?.setActionName("Erase")
+                            canvasUndo?.endUndoGrouping()
                         }
+                        .zIndex(10)  // make sure overlay sits above canvas
                         .transition(.opacity)
                     }
 
@@ -526,10 +581,8 @@ struct ContentView: View {
                     .autocorrectionDisabled(true)
 
             case .preview:
-                MathLabel(latex: previewLatex.isEmpty ? "\\;" : previewLatex)
-                    .id(previewLatex) // <-- ensures SwiftUI rebuilds when previewLatex changes
-                    .frame(maxWidth: .infinity,maxHeight: .infinity, alignment: .leading)
-                    .padding()
+                PseudoLatexPreview(text: previewLatex)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
                     .background(Color.white)
                     .cornerRadius(12)
                     .shadow(color: .black.opacity(0.1), radius: 4, x: 0, y: 2)
@@ -541,7 +594,6 @@ struct ContentView: View {
             HStack {
                 Button {
                     previewLatex = latexText  // copy whatever is in editor into preview
-                    print("Rendering:", previewLatex) // debug
                     withAnimation { panelMode = .preview }
                 } label: {
                     Label("Render LaTeX", systemImage: "eye")
@@ -571,6 +623,15 @@ struct ContentView: View {
         let trimmed = baseURL.trimmingCharacters(in: .whitespaces)
         return !trimmed.isEmpty
     }
+    private func makeConverter() -> LatexConverting {
+        if conversionBackend == "ondevice" {
+            return OnDeviceLatexConverter()
+        } else {
+            return NetworkLatexConverter(
+                apiKey: Bundle.main.object(forInfoDictionaryKey: "GEMINI_API_KEY") as? String ?? ""
+            )
+        }
+    }
 
     private func convertCurrent() async {
         guard isServerConfigured else {
@@ -590,7 +651,8 @@ struct ContentView: View {
         }
 
         do {
-            let latex = try await LatexService.convert(image: imageToSend, baseURLString: baseURL)
+            let converter = makeConverter()
+            let latex = try await converter.convert(image: imageToSend)
             latexText = latex
             previewLatex = cleanForKaTeX(latex)   // <-- cleaned version goes to KaTeX
             if showRightPanel == false {
@@ -605,6 +667,75 @@ struct ContentView: View {
     private func currentImageForCrop() -> UIImage? {
         if let img = pickedImage { return img }
         return nil
+    }
+    private func buildExportHTML() -> String {
+        // Use the cleaned preview if available, else clean the editor text now
+        let body = previewLatex.isEmpty ? cleanForKaTeX(latexText) : previewLatex
+
+        return """
+        <!doctype html>
+        <html>
+        <head>
+          <meta charset="utf-8">
+          <link rel="stylesheet" href="katex.min.css">
+          <style>
+            @page { size: 8.5in 11in; margin: 1in; }      /* tweak as you like */
+            html, body { margin:0; padding:0; }
+            body { font:16px -apple-system, BlinkMacSystemFont, 'SF Pro Text', system-ui, sans-serif; line-height:1.5; }
+            .page-break { break-before: page; page-break-before: always; }
+          </style>
+        </head>
+        <body>
+          <main id="content">
+            \(body)
+          </main>
+          <script src="katex.min.js"></script>
+          <script src="auto-render.min.js"></script>
+          <script>
+            document.addEventListener("DOMContentLoaded", function() {
+              try {
+                renderMathInElement(document.getElementById("content"), {
+                  delimiters: [
+                    {left:"$$", right:"$$", display:true},
+                    {left:"\\[", right:"\\]", display:true},
+                    {left:"$", right:"$", display:false}
+                  ],
+                  throwOnError:false
+                });
+              } finally {
+                // Signal the exporter that KaTeX has finished
+                window.__katexDone = true;
+              }
+            });
+          </script>
+        </body>
+        </html>
+        """
+    }
+
+    // Kick off the PDF export via WKWebView.createPDF
+    private func exportTypesetPDF() {
+        let html = buildExportHTML()
+        typesetExporter.exportPDF(html: html, baseURL: katexBaseURL) { result in
+            switch result {
+            case .success(let url):
+                shareURL = url
+                showShare = true
+            case .failure(let err):
+                errorMessage = err.localizedDescription
+            }
+        }
+    }
+
+    // Write a raw .tex file (no compile) and present the share sheet
+    private func exportTeX() {
+        do {
+            let url = try LatexExporter.writeTeXFile(body: latexText, fileName: "NTex.tex")
+            shareURL = url
+            showShare = true
+        } catch {
+            errorMessage = error.localizedDescription
+        }
     }
 }
 
@@ -798,6 +929,7 @@ private struct CanvasToolBar: View {
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 6)
+        .frame(height: 48)
         .background(.bar)
         .overlay(Divider(), alignment: .bottom)
     }
@@ -864,7 +996,7 @@ struct PencilCanvas: UIViewRepresentable {
     func makeCoordinator() -> Coord { Coord() }
 
     func makeUIView(context: Context) -> PKCanvasView {
-        let v = PKCanvasView()
+        let v = CanvasView()
         context.coordinator.canvas = v
 
         v.delegate = context.coordinator
@@ -890,47 +1022,87 @@ struct PencilCanvas: UIViewRepresentable {
         context.coordinator.drawingBinding = $drawing
         context.coordinator.undoBinding = $undoManager
         context.coordinator.viewportBinding = $viewport
+        context.coordinator.toolBinding = $tool
+        
+        let pencil = UIPencilInteraction()
+        pencil.delegate = context.coordinator
+        pencil.isEnabled = true
+        v.addInteraction(pencil)
+        
+        v.onLayout = { [weak v] _ in
+            guard let v else { return }
+            syncCanvasWidth(v)
+        }
 
         // seed initial viewport + content sizing on next runloop
         DispatchQueue.main.async {
             self.applyInsets(v)
             self.ensureContentSize(v)
+            self.syncCanvasWidth(v)
             context.coordinator.pushViewport(from: v)
             self.undoManager = v.undoManager
         }
 
         // Initial state
         v.drawing = drawing
-        applyToolIfNeeded(on: v, coordinator: context.coordinator)
+        applyTool(on: v, coordinator: context.coordinator)
 
         return v
     }
+    
+    private func syncCanvasWidth(_ v: PKCanvasView) {
+        let targetW = max(1, v.bounds.width)
+        if abs(v.contentSize.width - targetW) > 0.5 {
+            let targetH = max(v.contentSize.height, desiredContentHeight(v))
+            v.contentSize = CGSize(width: targetW, height: targetH)
+        }
+    }
 
     func updateUIView(_ v: PKCanvasView, context: Context) {
-        // Refresh coordinator bindings in case the parent restructured
-        context.coordinator.drawingBinding = $drawing
-        context.coordinator.undoBinding = $undoManager
+        // Rebind (parent may have restructured)
+        context.coordinator.drawingBinding  = $drawing
+        context.coordinator.undoBinding     = $undoManager
         context.coordinator.viewportBinding = $viewport
 
-        // Only push drawing down if it actually changed (prevents flicker & layout thrash)
-        if v.drawing != drawing {
-            v.drawing = drawing
+        // Only push drawing to PKCanvasView if it actually changed
+        if v.drawing != drawing { v.drawing = drawing }
+        
+        let targetW = max(1, v.bounds.width)
+        if abs(v.contentSize.width - targetW) > 0.5 {
+            // preserve existing height (or grow to desired), but reset width to match bounds
+            let targetH = max(v.contentSize.height, desiredContentHeight(v))
+            v.contentSize = CGSize(width: targetW, height: targetH)
+        }
+        syncCanvasWidth(v)
+        applyInsets(v)
+
+        // Update inputs used by applyTool
+        context.coordinator.currentToolType    = tool
+        context.coordinator.currentPenColor    = penColor
+        context.coordinator.currentStrokeWidth = strokeWidth
+        context.coordinator.currentEraseMode   = eraseMode
+
+        // Gated tool apply (no duplicates)
+        let key = "\(tool)|\(eraseMode)|\(rgbaKey(UIColor(penColor)))|\(strokeWidth)"
+        if context.coordinator.lastToolKey != key {
+            context.coordinator.lastToolKey = key
+            applyTool(on: v, coordinator: context.coordinator)
         }
 
-        applyInsets(v)
-        ensureContentSize(v)
-
-        // Diff tool state (tool type, color, width, erase mode)
-        context.coordinator.currentToolType = tool
-        context.coordinator.currentPenColor = penColor
-        context.coordinator.currentStrokeWidth = strokeWidth
-        context.coordinator.currentEraseMode = eraseMode
-        applyToolIfNeeded(on: v, coordinator: context.coordinator)
+        // NOTE: Do NOT call ensureContentSize(v) here.
+        // The coordinator grows content size after strokes via scheduleSync(...)
+    }
+    
+    private func rgbaKey(_ c: UIColor) -> String {
+        var r: CGFloat = 0, g: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
+        c.getRed(&r, green: &g, blue: &b, alpha: &a)
+        func q(_ x: CGFloat) -> String { String(format: "%.3f", x) } // quantize
+        return "\(q(r)),\(q(g)),\(q(b)),\(q(a))"
     }
 
     // MARK: - Coordinator
 
-    final class Coord: NSObject, PKCanvasViewDelegate, UIScrollViewDelegate {
+    final class Coord: NSObject, PKCanvasViewDelegate, UIScrollViewDelegate, UIPencilInteractionDelegate {
         // live canvas reference
         weak var canvas: PKCanvasView?
 
@@ -949,9 +1121,53 @@ struct PencilCanvas: UIViewRepresentable {
         var lastToolKey: String = ""
         var lastGestureEnabled: Bool?
         
+        //tool binding
+        var toolBinding: Binding<ToolType>!
+        var showPaletteBinding: Binding<Bool>?
+        
+        // keep track of previous non-eraser tool
+        private var lastNonEraser: ToolType = .pen
+        
         //too much refreshing going on
         private var isActivelyDrawing = false
         private var pendingSync: DispatchWorkItem?
+        
+        private var lastCommittedHeight: CGFloat = 0
+        
+        func pencilInteractionDidTap(_ interaction: UIPencilInteraction) {
+            let action: UIPencilPreferredAction
+            if #available(iOS 14.0, *) { action = UIPencilInteraction.preferredTapAction }
+            else { action = .switchEraser }
+
+            switch action {
+            case .ignore:
+                break
+
+            case .showColorPalette, .showContextualPalette, .showInkAttributes:
+                // open your color/width popover
+                showPaletteBinding?.wrappedValue = true
+
+            case .switchEraser:
+                let cur = toolBinding.wrappedValue
+                if cur == .eraser { toolBinding.wrappedValue = lastNonEraser }
+                else { lastNonEraser = cur; toolBinding.wrappedValue = .eraser }
+
+            case .switchPrevious:
+                let cur = toolBinding.wrappedValue
+                if cur != .eraser { lastNonEraser = cur }
+                toolBinding.wrappedValue = (cur == .eraser) ? lastNonEraser : .eraser
+
+            case .runSystemShortcut:
+                // nothing to run in-app; treat like palette for now
+                showPaletteBinding?.wrappedValue = true
+
+            @unknown default:
+                // safe fallback: toggle eraser
+                let cur = toolBinding.wrappedValue
+                if cur == .eraser { toolBinding.wrappedValue = lastNonEraser }
+                else { lastNonEraser = cur; toolBinding.wrappedValue = .eraser }
+            }
+        }
 
         // PKCanvasViewDelegate
         func canvasViewDrawingDidChange(_ canvasView: PKCanvasView) {
@@ -980,27 +1196,26 @@ struct PencilCanvas: UIViewRepresentable {
             )
         }
         private func scheduleSync(from cv: PKCanvasView, delay: TimeInterval) {
-                pendingSync?.cancel()
-                let work = DispatchWorkItem { [weak self, weak cv] in
-                    guard let self, let cv else { return }
+            pendingSync?.cancel()
+            let work = DispatchWorkItem { [weak self, weak cv] in
+                guard let self, let cv else { return }
 
-                    // Push drawing + undo to SwiftUI
-                    self.drawingBinding.wrappedValue = cv.drawing
-                    self.undoBinding.wrappedValue = cv.undoManager
+                // push drawing & undo
+                self.drawingBinding.wrappedValue = cv.drawing
+                self.undoBinding.wrappedValue = cv.undoManager
 
-                    // Grow page AFTER stroke; avoid relayout mid-draw
-                    let targetH = self.desiredContentHeight(cv)
-                    if abs(cv.contentSize.height - targetH) > 1 {
-                        cv.contentSize = CGSize(width: max(1, cv.bounds.width), height: targetH)
-                    }
-                }
-                pendingSync = work
-                if delay == 0 {
-                    DispatchQueue.main.async(execute: work)
-                } else {
-                    DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
+                // compute target height and only GROW
+                let target = self.desiredContentHeight(cv)
+                let growTo = max(self.lastCommittedHeight, target)
+                if growTo - self.lastCommittedHeight > 0.5, cv.contentSize.height < growTo - 0.5 {
+                    cv.contentSize = CGSize(width: max(1, cv.bounds.width), height: growTo)
+                    self.lastCommittedHeight = growTo
                 }
             }
+            pendingSync = work
+            if delay == 0 { DispatchQueue.main.async(execute: work) }
+            else { DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work) }
+        }
 
         // local copy of desired height so we can call it from delegate
         private func desiredContentHeight(_ v: PKCanvasView) -> CGFloat {
@@ -1010,10 +1225,17 @@ struct PencilCanvas: UIViewRepresentable {
             return max(minH, drawingBottom + 1000)
         }
     }
+    private final class CanvasView: PKCanvasView {
+        var onLayout: ((PKCanvasView) -> Void)?
+        override func layoutSubviews() {
+            super.layoutSubviews()
+            onLayout?(self)          // <- fires any time bounds change (animations, rotation, splits, etc.)
+        }
+    }
 
     // MARK: - Tool application (diffed)
 
-    private func applyToolIfNeeded(on v: PKCanvasView, coordinator: Coord) {
+    private func applyTool(on v: PKCanvasView, coordinator: Coord) {
         let key = toolKey(
             tool: coordinator.currentToolType,
             color: coordinator.currentPenColor,
@@ -1055,7 +1277,7 @@ struct PencilCanvas: UIViewRepresentable {
                     v.tool = PKEraserTool(.vector)
                 } else {
                     // keep harmless tool; drawing is disabled, overlay does pixel erase
-                    v.tool = PKInkingTool(.pen, color: .black, width: 1)
+                    v.tool = PKInkingTool(.pen, color: .clear, width: 1)
                 }
 
             case .lasso:
@@ -1121,64 +1343,6 @@ struct PencilCanvas: UIViewRepresentable {
     }
 }
 
-// MARK: - KaTeX SwiftUI wrapper
-
-struct MathLabel: UIViewRepresentable {
-    var latex: String
-
-    func makeUIView(context: Context) -> WKWebView {
-        let config = WKWebViewConfiguration()
-        config.defaultWebpagePreferences.allowsContentJavaScript = true
-        let webView = WKWebView(frame: .zero, configuration: config)
-        webView.isOpaque = false
-        webView.backgroundColor = .clear
-        return webView
-    }
-
-    func updateUIView(_ uiView: WKWebView, context: Context) {
-        print("MathLabel.updateUIView called with:", latex)
-        
-        let isDark = UITraitCollection.current.userInterfaceStyle == .dark
-        let bodyStyle = isDark
-            ? "background:#000; color:#fff; font-size:20px;"
-            : "background:#fff; color:#000; font-size:20px;"
-
-        let html = """
-        <!doctype html>
-        <html>
-        <head>
-          <meta charset="utf-8">
-          <link rel="stylesheet" href="katex.min.css">
-          <script src="katex.min.js"></script>
-          <script src="auto-render.min.js"></script>
-        </head>
-        <body style="\(bodyStyle)">
-          <div id="content">
-            \(latex)
-          </div>
-          <script>
-            document.addEventListener("DOMContentLoaded", function() {
-              try {
-                renderMathInElement(document.getElementById("content"), {
-                  delimiters: [
-                    {left: "$$", right: "$$", display: true},
-                    {left: "\\\\[", right: "\\\\]", display: true},
-                    {left: "$", right: "$", display: false}
-                  ],
-                  throwOnError: false
-                });
-              } catch(e) {
-                document.getElementById("content").innerHTML += "<p style='color:red'>KaTeX error: " + e + "</p>";
-              }
-            });
-          </script>
-        </body>
-        </html>
-        """
-
-        uiView.loadHTMLString(html, baseURL: Bundle.main.resourceURL)
-    }
-}
 // MARK: - Photos / Camera
 
 struct CameraPicker: UIViewControllerRepresentable {
@@ -1305,19 +1469,37 @@ struct CropperSheet: View {
 
 struct SettingsView: View {
     @Binding var baseURL: String
+    @Binding var conversionBackend: String
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
         NavigationStack {
             Form {
-                Section("Server") {
-                    TextField("Base URL (e.g. http://192.168.0.42:8000)", text: $baseURL)
-                        .keyboardType(.URL)
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled(true)
-                    Text("Simulator can use http://127.0.0.1:8000. Real iPad must use your Mac’s LAN IP.")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
+                Section("Conversion Engine") {
+                    Picker("Engine", selection: $conversionBackend) {
+                        Text("Server").tag("server")
+                        Text("On-Device (beta)").tag("ondevice")
+                    }
+                    .pickerStyle(.segmented)
+                    .accessibilityLabel("Conversion Engine")
+                }
+
+                if conversionBackend == "server" {
+                    Section("Server") {
+                        TextField("Base URL (e.g. http://192.168.0.42:8000)", text: $baseURL)
+                            .keyboardType(.URL)
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled(true)
+                        Text("Simulator can use http://127.0.0.1:8000. Real iPad must use your Mac’s LAN IP.")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
+                } else {
+                    Section("On-Device Status") {
+                        Text("Runs entirely on this device. Requires a supported model; current build uses a placeholder.")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
                 }
             }
             .navigationTitle("Settings")
@@ -1474,24 +1656,25 @@ extension UIImage {
         return result
     }
 }
-
-private func makeTempTexFile(text: String) -> URL? {
-    let dir = FileManager.default.temporaryDirectory
-    let url = dir.appendingPathComponent("ntx-\(UUID().uuidString.prefix(8)).tex")
-    do { try text.data(using: .utf8)?.write(to: url); return url } catch { return nil }
-}
-
 // MARK: - KaTeX cleaning helper
 private func cleanForKaTeX(_ raw: String) -> String {
     var s = raw
 
-    // Remove documentclass and usepackage
-    s = s.replacingOccurrences(of: "\\\\documentclass\\{.*?\\}", with: "", options: .regularExpression)
-    s = s.replacingOccurrences(of: "\\\\usepackage\\{.*?\\}", with: "", options: .regularExpression)
+    // 0) Normalize common “mistyped backslashes” before LaTeX commands.
+    //    Converts /int, ／sqrt, ¥frac, etc.  →  \int, \sqrt, \frac …
+    //    The negative lookbehind (?<![/∕／⁄¥￥]) keeps `//int` from turning into `/\int`.
+    let cmds = #"(int|sum|prod|lim|sqrt|frac|sin|cos|tan|log|ln|cdot|times|to|le|ge|ne|neq|infty|alpha|beta|gamma|pi|partial|nabla|pm|mp|cup|cap|subset|supset|approx|sim|equiv|forall|exists|left|right|rightarrow|Rightarrow|ldots|dots|vec|hat|bar|overline|underline|mathbb|mathcal|mathrm|mathbf)"#
+    s = s.replacingOccurrences(
+        of: #"(?<![/∕／⁄¥￥])[/∕／⁄¥￥]\s*\#(cmds)"#,
+        with: #"\\$1"#,
+        options: .regularExpression
+    )
 
-    // Remove begin{document} / end{document}
-    s = s.replacingOccurrences(of: "\\\\begin\\{document\\}", with: "", options: .regularExpression)
-    s = s.replacingOccurrences(of: "\\\\end\\{document\\}", with: "", options: .regularExpression)
+    // 1) (your existing cleanups)
+    s = s.replacingOccurrences(of: "\\\\documentclass\\{.*?\\}", with: "", options: .regularExpression)
+    s = s.replacingOccurrences(of: "\\\\usepackage\\{.*?\\}",   with: "", options: .regularExpression)
+    s = s.replacingOccurrences(of: "\\\\begin\\{document\\}",   with: "", options: .regularExpression)
+    s = s.replacingOccurrences(of: "\\\\end\\{document\\}",     with: "", options: .regularExpression)
 
     return s.trimmingCharacters(in: .whitespacesAndNewlines)
 }
